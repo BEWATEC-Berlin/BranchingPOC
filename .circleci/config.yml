@@ -1,0 +1,167 @@
+version: 2.1
+
+references:
+  workspace_root: &workspace_root
+    /tmp/workspace
+  attach_workspace: &attach_workspace
+    attach_workspace:
+      at: *workspace_root
+
+commands:
+  set_github_packages_access:
+    description: 'Add accessToken in order to fetch private packages'
+    steps:
+      - run: echo "always-auth=true" > ~/.npmrc
+      - run: echo "registry=https://npm.pkg.github.com/BEWATEC-Berlin" >> ~/.npmrc
+      - run: echo "_authToken=$PRIVATE_REPO_ACCESS_TOKEN" >> ~/.npmrc
+      - run: echo "//npm.pkg.github.com/:_authToken=${PRIVATE_REPO_ACCESS_TOKEN}" >> ~/.npmrc
+
+executors:
+  e2e-test-docker:
+    docker:
+      - image: circleci/buildpack-deps:stretch
+  aws-docker:
+    docker:
+      - image: 781111904870.dkr.ecr.eu-central-1.amazonaws.com/node-with-awscli:11.10
+        aws_auth:
+          aws_access_key_id: $AWS_ACCESS_KEY_ID
+          aws_secret_access_key: $AWS_SECRET_ACCESS_KEY
+
+workflows:
+  version: 2
+
+  build-deploy:
+    jobs:
+      - test:
+          pre-steps:
+            - set_github_packages_access
+
+      - build:
+          requires:
+            - test
+          filters:
+            branches:
+              ignore: master
+          pre-steps:
+            - set_github_packages_access
+
+      - hold_staging_deploy:
+          type: approval
+          requires:
+            - build
+          filters:
+            branches:
+              ignore: master
+
+      - deploy_staging:
+          requires:
+            - hold_staging_deploy
+          filters:
+            branches:
+              ignore: master
+
+
+      - build_production:
+          requires:
+            - test
+          filters:
+            branches:
+              only: master
+          pre-steps:
+            - set_github_packages_access
+     
+      - deploy_production:
+          requires:
+            - build_production
+          filters:
+            branches:
+              only: master
+
+jobs:
+  test:
+    docker:
+      - image: circleci/node:12.8.0
+    working_directory: ~/repo
+    steps:
+      - checkout
+      # Download and cache dependencies
+      - restore_cache:
+          keys:
+            - v1-dependencies-{{ checksum "package.json" }}
+            # fallback to using the latest cache if no exact match is found
+            - v1-dependencies-
+      - run: cp ~/.npmrc .npmrc
+      - run: yarn install
+      - save_cache:
+          paths:
+            - node_modules
+          key: v1-dependencies-{{ checksum "package.json" }}
+      - run: yarn test
+
+  build:
+    executor: aws-docker
+    steps:
+      - *attach_workspace
+      - checkout
+      - run: mkdir build
+      - run: cp ~/.npmrc .npmrc
+      - run: yarn install
+      - run: echo 'export EnvName="$STG_ENV_NAME"' >> $BASH_ENV
+      - run: yarn build
+      - run:
+          name: Persist build assets
+          command: |
+            set -exu
+            mkdir -p /tmp/workspace
+            mv build /tmp/workspace/build
+      - persist_to_workspace: # store this folder for other jobs
+          root: *workspace_root
+          paths:
+            - build
+
+  build_production:
+    executor: aws-docker
+    steps:
+      - *attach_workspace
+      - checkout
+      - run: mkdir build
+      - run: cp ~/.npmrc .npmrc
+      - run: yarn install
+      - run: echo 'export EnvName="$PROD_ENV_NAME"' >> $BASH_ENV
+      - run: yarn build
+      - run:
+          name: Persist build assets
+          command: |
+            set -exu
+            mkdir -p /tmp/workspace
+            mv build /tmp/workspace/build
+      - persist_to_workspace: # store this folder for other jobs
+          root: *workspace_root
+          paths:
+            - build
+
+  deploy_staging:
+    executor: aws-docker
+    steps:
+    - *attach_workspace
+    - run:
+        name: Restore assets from previous Job
+        command: |
+          set -exu
+          cp -r /tmp/workspace/build ./build
+    - run: aws s3 sync ./build s3://connected-care-webapp2-preprod
+    - run: aws cloudfront create-invalidation --distribution-id EQBT9VPAYCMG6 --paths "/*"
+
+           
+  
+  deploy_production:
+    executor: aws-docker
+    steps:
+    - *attach_workspace
+    - run:
+        name: Restore assets from previous Job
+        command: |
+          set -exu
+          cp -r /tmp/workspace/build ./build
+    - run: aws s3 sync ./build s3://connected-care-webapp2-preprod
+    - run: aws cloudfront create-invalidation --distribution-id EQBT9VPAYCMG6 --paths "/*"
