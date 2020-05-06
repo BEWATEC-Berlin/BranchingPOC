@@ -1,1 +1,1 @@
-console.log('Hello world from', env.EnvName);
+console.log('Hello world from ', env.EnvName);
