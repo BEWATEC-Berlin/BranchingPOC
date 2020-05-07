@@ -1,2 +1,2 @@
 console.log('Hello world from', env.EnvName);
-console.log('Looks good');
+console.log('Looks good for');
